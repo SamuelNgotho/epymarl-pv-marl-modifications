@@ -1,0 +1,50 @@
+# --- MAPPO settings used for the PV reactive power agents (IEEE Access paper, Ngotho et al.) ---
+# Values are those of the training runs reported in the paper (EPyMARL commit cbc38c0 + patch).
+# Settings not listed here are the EPyMARL defaults (config/default.yaml, config/envs/gymma.yaml).
+
+name: "mappo_pv"
+
+# policy and action selection
+action_selector: "soft_policies"   # stochastic actions in training, most probable action in evaluation (test_greedy)
+mask_before_softmax: True
+agent: "rnn"                       # GRU actor
+agent_output_type: "pi_logits"
+mac: "basic_mac"                   # one actor with shared parameters for all agents
+obs_agent_id: True                 # one-hot agent index appended to each observation
+obs_last_action: False
+obs_individual_obs: False
+hidden_dim: 128
+use_rnn: True
+
+# critic and learner
+learner: "ppo_learner"
+critic_type: "cv_critic"           # centralised critic
+lr: 0.0003
+gamma: 0.99
+eps_clip: 0.2
+epochs: 5
+entropy_coef: 0.01
+q_nstep: 5
+standardise_rewards: True
+standardise_returns: False
+target_update_interval_or_tau: 0.01
+grad_norm_clip: 10
+add_value_last_step: True
+
+# data collection: one environment, policy updated after 16 new episodes
+runner: "episode"
+batch_size_run: 1
+batch_size: 16
+buffer_size: 16
+
+# training length, validation, and checkpointing
+t_max: 1000000
+test_greedy: True
+test_interval: 4608                # two validation episodes every 4608 steps
+test_nepisode: 2
+save_model: True
+save_best_only: True               # keep only the checkpoint with the highest mean validation return
+log_interval: 1500
+runner_log_interval: 1500
+learner_log_interval: 1500
+use_cuda: False

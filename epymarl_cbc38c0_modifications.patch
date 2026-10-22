@@ -1,0 +1,418 @@
+diff --git a/src/components/action_selectors.py b/src/components/action_selectors.py
+index 9115b84..0f3b67e 100644
+--- a/src/components/action_selectors.py
++++ b/src/components/action_selectors.py
+@@ -70,6 +70,9 @@ class SoftPoliciesSelector():
+         self.args = args
+ 
+     def select_action(self, agent_inputs, avail_actions, t_env, test_mode=False):
++        # [Modification] deterministic evaluation: in test mode, select the most probable action
++        if test_mode and getattr(self.args, "test_greedy", True):
++            return agent_inputs.argmax(dim=-1).long()
+         m = Categorical(agent_inputs)
+         picked_actions = m.sample().long()
+         return picked_actions
+diff --git a/src/envs/gymma.py b/src/envs/gymma.py
+index aeba61f..a0d4e00 100644
+--- a/src/envs/gymma.py
++++ b/src/envs/gymma.py
+@@ -2,7 +2,7 @@ from collections.abc import Iterable
+ import warnings
+ 
+ import gymnasium as gym
+-from gymnasium.spaces import flatdim
++from gymnasium.spaces import Box, Discrete, Tuple, flatdim
+ from gymnasium.wrappers import TimeLimit
+ import numpy as np
+ 
+@@ -30,12 +30,13 @@ class GymmaWrapper(MultiAgentEnv):
+         self,
+         key,
+         time_limit,
+-        pretrained_wrapper,
+-        seed,
+-        common_reward,
+-        reward_scalarisation,
++        pretrained_wrapper=None,
++        seed=None,
++        common_reward=False,
++        reward_scalarisation="sum",
+         **kwargs,
+     ):
++        # Create env
+         self._env = gym.make(f"{key}", **kwargs)
+         self._env = TimeLimit(self._env, max_episode_steps=time_limit)
+         self._env = FlattenObservation(self._env)
+@@ -43,22 +44,18 @@ class GymmaWrapper(MultiAgentEnv):
+         if pretrained_wrapper:
+             self._env = getattr(pretrained, pretrained_wrapper)(self._env)
+ 
+-        self.n_agents = self._env.unwrapped.n_agents
++        self.n_agents = getattr(self._env.unwrapped, "n_agents", 1)
+         self.episode_limit = time_limit
+         self._obs = None
+         self._info = None
+-
+-        self.longest_action_space = max(self._env.action_space, key=lambda x: x.n)
+-        self.longest_observation_space = max(
+-            self._env.observation_space, key=lambda x: x.shape
+-        )
+-
+         self._seed = seed
+-        try:
+-            self._env.unwrapped.seed(self._seed)
+-        except:
+-            self._env.reset(seed=self._seed)
++        if seed is not None:
++            try:
++                self._env.unwrapped.seed(seed)
++            except:
++                self._env.reset(seed=seed)
+ 
++        # Reward aggregation
+         self.common_reward = common_reward
+         if self.common_reward:
+             if reward_scalarisation == "sum":
+@@ -66,15 +63,38 @@ class GymmaWrapper(MultiAgentEnv):
+             elif reward_scalarisation == "mean":
+                 self.reward_agg_fn = lambda rewards: sum(rewards) / len(rewards)
+             else:
+-                raise ValueError(
+-                    f"Invalid reward_scalarisation: {reward_scalarisation} (only support 'sum' or 'mean')"
+-                )
++                raise ValueError(f"Invalid reward_scalarisation: {reward_scalarisation}")
++
++        # Detect continuous / discrete
++        self.is_continuous = self._detect_continuous(self._env.action_space)
++
++        # Handle longest action/obs spaces
++        self.longest_action_space = self._get_longest_space(self._env.action_space)
++        self.longest_observation_space = self._get_longest_space(
++            self._env.observation_space
++        )
++
++    def _detect_continuous(self, space):
++        if isinstance(space, Box):
++            return True
++        elif isinstance(space, Tuple):
++            return all(self._detect_continuous(s) for s in space.spaces)
++        elif isinstance(space, list):
++            return all(self._detect_continuous(s) for s in space)
++        return False
++
++    def _get_longest_space(self, space):
++        if isinstance(space, list):
++            return max(space, key=flatdim)
++        elif isinstance(space, Tuple):
++            return max(space.spaces, key=flatdim)
++        return space
+ 
+     def _pad_observation(self, obs):
+         return [
+             np.pad(
+                 o,
+-                (0, self.longest_observation_space.shape[0] - len(o)),
++                (0, flatdim(self.longest_observation_space) - len(o)),
+                 "constant",
+                 constant_values=0,
+             )
+@@ -82,63 +102,58 @@ class GymmaWrapper(MultiAgentEnv):
+         ]
+ 
+     def step(self, actions):
+-        """Returns obss, reward, terminated, truncated, info"""
+-        actions = [int(a) for a in actions]
++        # Only cast to int if discrete
++        if not self.is_continuous:
++            actions = [int(a) for a in actions]
++
+         obs, reward, done, truncated, self._info = self._env.step(actions)
+         self._obs = self._pad_observation(obs)
+ 
+         if self.common_reward and isinstance(reward, Iterable):
+             reward = float(self.reward_agg_fn(reward))
+-        elif not self.common_reward and not isinstance(reward, Iterable):
+-            warnings.warn(
+-                "common_reward is False but received scalar reward from the environment, returning reward as is"
+-            )
+ 
+         if isinstance(done, Iterable):
+             done = all(done)
++
+         return self._obs, reward, done, truncated, self._info
+ 
+     def get_obs(self):
+-        """Returns all agent observations in a list"""
+         return self._obs
+ 
+     def get_obs_agent(self, agent_id):
+-        """Returns observation for agent_id"""
+-        raise self._obs[agent_id]
++        return self._obs[agent_id]
+ 
+     def get_obs_size(self):
+-        """Returns the shape of the observation"""
+         return flatdim(self.longest_observation_space)
+ 
+     def get_state(self):
+         return np.concatenate(self._obs, axis=0).astype(np.float32)
+ 
+     def get_state_size(self):
+-        """Returns the shape of the state"""
+         if hasattr(self._env.unwrapped, "state_size"):
+             return self._env.unwrapped.state_size
+         return self.n_agents * flatdim(self.longest_observation_space)
+ 
+     def get_avail_actions(self):
+-        avail_actions = []
+-        for agent_id in range(self.n_agents):
+-            avail_agent = self.get_avail_agent_actions(agent_id)
+-            avail_actions.append(avail_agent)
+-        return avail_actions
++        return [self.get_avail_agent_actions(i) for i in range(self.n_agents)]
+ 
+     def get_avail_agent_actions(self, agent_id):
+-        """Returns the available actions for agent_id"""
+-        valid = flatdim(self._env.action_space[agent_id]) * [1]
+-        invalid = [0] * (self.longest_action_space.n - len(valid))
++        if self.is_continuous:
++            return np.ones(flatdim(self.longest_action_space), dtype=np.float32)
++        # Discrete actions
++        space = (
++            self._env.action_space[agent_id]
++            if isinstance(self._env.action_space, (list, Tuple))
++            else self._env.action_space
++        )
++        valid = flatdim(space) * [1]
++        invalid = [0] * (flatdim(self.longest_action_space) - len(valid))
+         return valid + invalid
+ 
+     def get_total_actions(self):
+-        """Returns the total number of actions an agent could ever take"""
+-        # TODO: This is only suitable for a discrete 1 dimensional action space for each agent
+         return flatdim(self.longest_action_space)
+ 
+     def reset(self, seed=None, options=None):
+-        """Returns initial observations and info"""
+         obs, info = self._env.reset(seed=seed, options=options)
+         self._obs = self._pad_observation(obs)
+         return self._obs, info
+diff --git a/src/main.py b/src/main.py
+index 12e99bf..05bec2b 100644
+--- a/src/main.py
++++ b/src/main.py
+@@ -124,7 +124,7 @@ if __name__ == "__main__":
+     # Save to disk by default for sacred
+     logger.info("Saving to FileStorageObserver in results/sacred.")
+     file_obs_path = os.path.join(
+-        results_path, f"sacred/{config_dict['name']}/{map_name}"
++        results_path, f"sacred/{config_dict['name']}/{map_name[:10]}"  # [Modification] short path for Windows
+     )
+ 
+     # ex.observers.append(MongoObserver(db_name="marlbench")) #url='172.31.5.187:27017'))
+diff --git a/src/run.py b/src/run.py
+index 41e0a38..ef0c3e5 100644
+--- a/src/run.py
++++ b/src/run.py
+@@ -1,4 +1,5 @@
+ import datetime
++import json
+ import os
+ from os.path import dirname, abspath
+ import pprint
+@@ -7,6 +8,7 @@ import time
+ import threading
+ from types import SimpleNamespace as SN
+ 
++import numpy as np
+ import torch as th
+ 
+ from controllers import REGISTRY as mac_REGISTRY
+@@ -43,8 +45,10 @@ def run(_run, _config, _log):
+         map_name = _config["env_args"]["map_name"]
+     except:
+         map_name = _config["env_args"]["key"]
++    # [Modification] run name without ':' and with a short map name, so that it is a valid Windows path
+     unique_token = (
+-        f"{_config['name']}_seed{_config['seed']}_{map_name}_{datetime.datetime.now()}"
++        f"{_config['name']}_seed{_config['seed']}_{map_name[:10]}_"
++        f"{datetime.datetime.now().strftime('%Y-%m-%d-%H%M%S')}"
+     )
+ 
+     args.unique_token = unique_token
+@@ -186,7 +190,11 @@ def run_sequential(args, logger):
+ 
+     # start training
+     episode = 0
++    episodes_since_update = 0   # [Modification] new episodes collected since the last policy update
+     last_test_T = -args.test_interval - 1
++    save_best_only = getattr(args, "save_best_only", False)   # [Modification] keep only the best validation model
++    best_test_return = -float("inf")
++    best_save_path = None
+     last_log_T = 0
+     model_save_time = 0
+ 
+@@ -200,7 +208,10 @@ def run_sequential(args, logger):
+         episode_batch = runner.run(test_mode=False)
+         buffer.insert_episode_batch(episode_batch)
+ 
+-        if buffer.can_sample(args.batch_size):
++        # [Modification] update only after batch_size NEW episodes from the current policy
++        episodes_since_update += args.batch_size_run
++        if buffer.can_sample(args.batch_size) and episodes_since_update >= args.batch_size:
++            episodes_since_update = 0
+             episode_sample = buffer.sample(args.batch_size)
+ 
+             # Truncate batch to only filled timesteps
+@@ -227,10 +238,28 @@ def run_sequential(args, logger):
+             last_time = time.time()
+ 
+             last_test_T = runner.t_env
++            test_returns = []
+             for _ in range(n_test_runs):
+-                runner.run(test_mode=True)
+-
+-        if args.save_model and (
++                test_batch = runner.run(test_mode=True)
++                test_returns.append(test_batch["reward"].sum().item() / test_batch.batch_size)
++            # [Modification] keep only the model with the highest mean validation return
++            if args.save_model and save_best_only:
++                mean_test_return = float(np.mean(test_returns))
++                if mean_test_return > best_test_return:
++                    best_test_return = mean_test_return
++                    save_path = os.path.join(args.local_results_path, "models", args.unique_token, str(runner.t_env))
++                    os.makedirs(save_path, exist_ok=True)
++                    learner.save_models(save_path)
++                    if best_save_path is not None and best_save_path != save_path:
++                        shutil.rmtree(best_save_path, ignore_errors=True)   # delete the previous best
++                    best_save_path = save_path
++                    with open(os.path.join(save_path, "best_model_info.json"), "w") as f:
++                        json.dump({"t_env": runner.t_env, "mean_test_return": mean_test_return,
++                                   "n_test_episodes": len(test_returns)}, f, indent=2)
++                    logger.console_logger.info(
++                        "New best model (mean test return {:.4f}) saved to {}".format(mean_test_return, save_path))
++
++        if args.save_model and not save_best_only and (
+             runner.t_env - model_save_time >= args.save_model_interval
+             or model_save_time == 0
+         ):
+diff --git a/src/runners/episode_runner.py b/src/runners/episode_runner.py
+index c84af50..731da17 100644
+--- a/src/runners/episode_runner.py
++++ b/src/runners/episode_runner.py
+@@ -75,58 +75,69 @@ class EpisodeRunner:
+             episode_return = np.zeros(self.args.n_agents)
+         self.mac.init_hidden(batch_size=self.batch_size)
+ 
+-        while not terminated:
+-            pre_transition_data = {
++        # ---- initial state at t=0 ----
++        self.batch.update(
++            {
+                 "state": [self.env.get_state()],
+                 "avail_actions": [self.env.get_avail_actions()],
+                 "obs": [self.env.get_obs()],
+-            }
+-
+-            self.batch.update(pre_transition_data, ts=self.t)
++            },
++            ts=0,
++            mark_filled=True,
++        )
+ 
+-            # Pass the entire batch of experiences up till now to the agents
+-            # Receive the actions for each agent at this timestep in a batch of size 1
++        t = 0
++        while not terminated:
++            # choose actions for current timestep
+             actions = self.mac.select_actions(
+-                self.batch, t_ep=self.t, t_env=self.t_env, test_mode=test_mode
++                self.batch, t_ep=t, t_env=self.t_env, test_mode=test_mode
+             )
+ 
++            # store chosen actions
++            self.batch.update({"actions": actions}, ts=t, mark_filled=False)
++
++            # step the environment
+             _, reward, terminated, truncated, env_info = self.env.step(actions[0])
+             terminated = terminated or truncated
+             if test_mode and self.args.render:
+                 self.env.render()
+             episode_return += reward
+ 
+-            post_transition_data = {
+-                "actions": actions,
++            # store reward and termination flag for this timestep
++            post_data = {
++                "reward": [(reward,)] if self.args.common_reward else [tuple(reward)],
+                 "terminated": [(terminated != env_info.get("episode_limit", False),)],
+             }
+-            if self.args.common_reward:
+-                post_transition_data["reward"] = [(reward,)]
+-            else:
+-                post_transition_data["reward"] = [tuple(reward)]
+-
+-            self.batch.update(post_transition_data, ts=self.t)
+-
+-            self.t += 1
+-
+-        last_data = {
+-            "state": [self.env.get_state()],
+-            "avail_actions": [self.env.get_avail_actions()],
+-            "obs": [self.env.get_obs()],
+-        }
+-        if test_mode and self.args.render:
+-            print(f"Episode return: {episode_return}")
+-        self.batch.update(last_data, ts=self.t)
+-
+-        # Select actions in the last stored state
+-        actions = self.mac.select_actions(
+-            self.batch, t_ep=self.t, t_env=self.t_env, test_mode=test_mode
+-        )
+-        self.batch.update({"actions": actions}, ts=self.t)
++            self.batch.update(post_data, ts=t, mark_filled=False)
++
++            # get next state data (will become pre‑transition data for the next timestep)
++            next_state = self.env.get_state()
++            next_avail_actions = self.env.get_avail_actions()
++            next_obs = self.env.get_obs()
++
++            # move to the next timestep
++            t += 1
++
++            # store the next state as pre‑transition data at the new timestep
++            self.batch.update(
++                {
++                    "state": [next_state],
++                    "avail_actions": [next_avail_actions],
++                    "obs": [next_obs],
++                },
++                ts=t,
++                mark_filled=True,
++            )
+ 
++            # loop continues if not terminated; if terminated, the final state is already stored at ts = episode_length
++
++        # ---- after loop: nothing else to add ----
++
++        # update statistics
+         cur_stats = self.test_stats if test_mode else self.train_stats
+         cur_returns = self.test_returns if test_mode else self.train_returns
+         log_prefix = "test_" if test_mode else ""
++
+         cur_stats.update(
+             {
+                 k: cur_stats.get(k, 0) + env_info.get(k, 0)
+@@ -134,10 +145,10 @@ class EpisodeRunner:
+             }
+         )
+         cur_stats["n_episodes"] = 1 + cur_stats.get("n_episodes", 0)
+-        cur_stats["ep_length"] = self.t + cur_stats.get("ep_length", 0)
++        cur_stats["ep_length"] = t + cur_stats.get("ep_length", 0)   # t now equals episode length
+ 
+         if not test_mode:
+-            self.t_env += self.t
++            self.t_env += t
+ 
+         cur_returns.append(episode_return)
+ 
