@@ -1,8 +1,12 @@
 # EPyMARL modifications for multi-agent PV reactive power control
 
+<!--
 This repository contains the changes made to the EPyMARL library for the MARL agents of the paper
 
 > S. Ngotho, M. Conlon, and M. Basu, "Centralized-Zonal Voltage Management Under Uncertainty: A Two-Timescale Robust MPC and Multi-Agent Reinforcement Learning Framework for PV–Energy Storage Coordination," IEEE Access (under review).
+-->
+
+This repository contains modifications of the EPyMARL library and a MAPPO training configuration for multi-agent reactive power control of PV inverters.
 
 Only the modifications of EPyMARL files and the EPyMARL training configuration are provided here.
 
@@ -29,7 +33,7 @@ git apply epymarl_cbc38c0_modifications.patch
 | `src/components/action_selectors.py` | In evaluation (`test_mode` with `test_greedy: True`), the most probable action is selected instead of a sampled one. |
 | `src/runners/episode_runner.py` | The episode loop is reorganised. The stored state, observation, action, reward, and termination data are the same as in the original. |
 | `src/main.py` | Shorter results path, needed on Windows. |
-| `src/config/algs/mappo_pv.yaml` | New configuration file with the MAPPO training settings used in the paper. |
+| `src/config/algs/mappo_pv.yaml` | New configuration file with the MAPPO training settings. |
 
 The MAPPO learner, the actor, and the critic are not changed.
 
@@ -54,7 +58,7 @@ All settings are in `src/config/algs/mappo_pv.yaml`. Settings not listed there a
 
 ## Configurations
 
-The four MARL configurations of the paper use the same settings and differ only in the observation and reward options.
+The four MARL configurations use the same settings and differ only in the observation and reward options.
 
 | Configuration | Observation | Reward | Options |
 |---|---|---|---|
