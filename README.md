@@ -52,7 +52,7 @@ All settings are in `src/config/algs/mappo_pv.yaml`. Settings not listed there a
 | Batch size / buffer size | 16 / 16 episodes |
 | Actor | GRU, hidden size 128, parameters shared by all agents, one-hot agent index |
 | Critic | Centralised (`cv_critic`) |
-| Training steps | 1e6 |
+| Training steps | 900000 |
 | Validation | 2 episodes every 4608 steps, best checkpoint kept |
 | Random seeds | 1, 2, 3 |
 
