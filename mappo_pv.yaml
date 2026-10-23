@@ -38,7 +38,7 @@ batch_size: 16
 buffer_size: 16
 
 # training length, validation, and checkpointing
-t_max: 1000000
+t_max: 900000
 test_greedy: True
 test_interval: 4608                # two validation episodes every 4608 steps
 test_nepisode: 2
